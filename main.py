@@ -246,7 +246,7 @@ with st.sidebar:
     access_token = st.text_input(
         "Token de Acesso",
         type="password",
-        value="W533LQtIq7UEFAScwQnRRFP65CW6AuaR",
+        value="HHnh1NRwT2wHSK2THW7swhgLTn6pO8T7",
         help="Insira seu token de acesso do RD Station"
     )
     
