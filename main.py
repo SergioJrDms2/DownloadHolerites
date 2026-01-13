@@ -157,7 +157,7 @@ def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
     status_text = st.empty()
     
     while True:
-        params = {"page[number]": pagina, "page[size]": 500}
+        params = {"page[number]": pagina, "page[size]": 200}
         
         try:
             response = fazer_requisicao_com_retry(url, headers, params)
@@ -306,7 +306,7 @@ with st.sidebar:
             "Máximo de Deals",
             min_value=1,
             max_value=1000,
-            value=100,
+            value=200,
             help="Limite de deals para processar"
         )
     else:
