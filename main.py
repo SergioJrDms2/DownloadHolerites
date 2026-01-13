@@ -96,7 +96,7 @@ def buscar_organizations(token):
     
     with st.spinner("Buscando organizações..."):
         while True:
-            params = {"page[number]": pagina, "page[size]": 500}
+            params = {"page[number]": pagina, "page[size]": 100}
             try:
                 response = fazer_requisicao_com_retry(url, headers, params)
                 if not response:
