@@ -96,7 +96,7 @@ def buscar_organizations(token):
     
     with st.spinner("Buscando organizações..."):
         while True:
-            params = {"page[number]": pagina, "page[size]": 100}
+            params = {"page[number]": pagina, "page[size]": 500}
             try:
                 response = fazer_requisicao_com_retry(url, headers, params)
                 if not response:
@@ -157,7 +157,7 @@ def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
     status_text = st.empty()
     
     while True:
-        params = {"page[number]": pagina, "page[size]": 100}
+        params = {"page[number]": pagina, "page[size]": 500}
         
         try:
             response = fazer_requisicao_com_retry(url, headers, params)
@@ -246,7 +246,7 @@ with st.sidebar:
     access_token = st.text_input(
         "Token de Acesso",
         type="password",
-        value="YAMmLvah8WOkFzihE9ZXgCLf0Fh250jL",
+        value="YzXVJZGprpRkChgmodBjyimsqXNuYAqJ",
         help="Insira seu token de acesso do RD Station"
     )
     
