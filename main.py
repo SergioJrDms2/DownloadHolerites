@@ -2,9 +2,11 @@ import streamlit as st
 import requests
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import zipfile
 import io
+import json
+from pathlib import Path
 
 # Configuração da página
 st.set_page_config(
@@ -12,6 +14,12 @@ st.set_page_config(
     page_icon="📄",
     layout="wide"
 )
+
+# Configurações OAuth2
+CLIENT_ID = "43462960-54de-43a7-b09c-ba3e6df8c558"
+CLIENT_SECRET = st.secrets.get("RD_CLIENT_SECRET", "")  # Coloque no secrets.toml
+REDIRECT_URI = "http://localhost:8501"  # Porta padrão do Streamlit
+TOKEN_FILE = "rd_tokens.json"
 
 # CSS customizado
 st.markdown("""
@@ -44,6 +52,13 @@ st.markdown("""
         border-radius: 4px;
         margin: 1rem 0;
     }
+    .error-box {
+        padding: 1rem;
+        background-color: #f8d7da;
+        border-left: 4px solid #dc3545;
+        border-radius: 4px;
+        margin: 1rem 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -54,6 +69,10 @@ if 'holerites_baixados' not in st.session_state:
     st.session_state.holerites_baixados = []
 if 'processando' not in st.session_state:
     st.session_state.processando = False
+if 'access_token' not in st.session_state:
+    st.session_state.access_token = None
+if 'token_expiry' not in st.session_state:
+    st.session_state.token_expiry = None
 
 # Palavras-chave para holerites
 PALAVRAS_CHAVE_HOLERITE = [
@@ -63,16 +82,150 @@ PALAVRAS_CHAVE_HOLERITE = [
     "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
 ]
 
-# Funções auxiliares
+# ==================== FUNÇÕES DE AUTENTICAÇÃO ====================
+
+def salvar_tokens(access_token, refresh_token, expires_in):
+    """Salva os tokens em arquivo JSON"""
+    tokens = {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'expires_at': (datetime.now() + timedelta(seconds=expires_in)).isoformat()
+    }
+    
+    with open(TOKEN_FILE, 'w') as f:
+        json.dump(tokens, f)
+    
+    # Atualiza session state
+    st.session_state.access_token = access_token
+    st.session_state.token_expiry = datetime.fromisoformat(tokens['expires_at'])
+
+def carregar_tokens():
+    """Carrega tokens do arquivo"""
+    if not os.path.exists(TOKEN_FILE):
+        return None
+    
+    try:
+        with open(TOKEN_FILE, 'r') as f:
+            tokens = json.load(f)
+        
+        expiry = datetime.fromisoformat(tokens['expires_at'])
+        
+        # Verifica se o token ainda é válido (com margem de 5 minutos)
+        if expiry > datetime.now() + timedelta(minutes=5):
+            st.session_state.access_token = tokens['access_token']
+            st.session_state.token_expiry = expiry
+            return tokens
+        else:
+            # Token expirado, tenta refresh
+            return refresh_access_token(tokens['refresh_token'])
+    except Exception as e:
+        st.error(f"Erro ao carregar tokens: {e}")
+        return None
+
+def obter_access_token(authorization_code):
+    """Obtém access token usando o código de autorização"""
+    url = "https://api.rd.services/auth/token"
+    
+    payload = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'code': authorization_code,
+        'redirect_uri': REDIRECT_URI
+    }
+    
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        salvar_tokens(
+            data['access_token'],
+            data['refresh_token'],
+            data['expires_in']
+        )
+        
+        return data
+    except Exception as e:
+        st.error(f"Erro ao obter access token: {e}")
+        if hasattr(e, 'response'):
+            st.error(f"Resposta: {e.response.text}")
+        return None
+
+def refresh_access_token(refresh_token):
+    """Atualiza o access token usando refresh token"""
+    url = "https://api.rd.services/auth/token"
+    
+    payload = {
+        'client_id': CLIENT_ID,
+        'client_secret': CLIENT_SECRET,
+        'refresh_token': refresh_token
+    }
+    
+    try:
+        response = requests.post(url, json=payload)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        salvar_tokens(
+            data['access_token'],
+            data['refresh_token'],
+            data['expires_in']
+        )
+        
+        st.success("✓ Token atualizado com sucesso!")
+        return data
+    except Exception as e:
+        st.error(f"Erro ao atualizar token: {e}")
+        if hasattr(e, 'response'):
+            st.error(f"Resposta: {e.response.text}")
+        # Remove tokens inválidos
+        if os.path.exists(TOKEN_FILE):
+            os.remove(TOKEN_FILE)
+        st.session_state.access_token = None
+        st.session_state.token_expiry = None
+        return None
+
+def verificar_e_renovar_token():
+    """Verifica se o token precisa ser renovado e renova se necessário"""
+    if not st.session_state.token_expiry:
+        return False
+    
+    # Se faltam menos de 10 minutos para expirar, renova
+    if st.session_state.token_expiry < datetime.now() + timedelta(minutes=10):
+        tokens = carregar_tokens()
+        return tokens is not None
+    
+    return True
+
+def get_authorization_url():
+    """Gera URL de autorização"""
+    return f"https://accounts.rdstation.com/oauth/authorize?response_type=code&client_id={CLIENT_ID}&redirect_uri={REDIRECT_URI}"
+
+# ==================== FUNÇÕES DA API ====================
+
 def fazer_requisicao_com_retry(url, headers, params=None, max_tentativas=3):
     """Faz requisição com retry automático"""
     for tentativa in range(max_tentativas):
         try:
             response = requests.get(url, headers=headers, params=params)
+            
+            if response.status_code == 401:
+                # Token expirado, tenta renovar
+                st.warning("Token expirado, renovando...")
+                tokens = carregar_tokens()
+                if tokens:
+                    headers["Authorization"] = f"Bearer {st.session_state.access_token}"
+                    continue
+                else:
+                    raise Exception("Não foi possível renovar o token")
+            
             if response.status_code == 429:
                 wait_time = (tentativa + 1) * 5
                 time.sleep(wait_time)
                 continue
+            
             response.raise_for_status()
             return response
         except requests.exceptions.HTTPError as e:
@@ -236,28 +389,93 @@ def baixar_holerites_deal(token, deal_id):
     except Exception as e:
         return []
 
-# Interface principal
+# ==================== INTERFACE PRINCIPAL ====================
+
 st.markdown('<div class="main-header">📄 Download de Holerites - RD Station CRM</div>', unsafe_allow_html=True)
 
-# Sidebar - Configurações
+# Verifica se há código de autorização na URL
+query_params = st.query_params
+if 'code' in query_params and not st.session_state.access_token:
+    code = query_params['code']
+    st.info("🔄 Processando autorização...")
+    resultado = obter_access_token(code)
+    if resultado:
+        st.success("✅ Autenticação realizada com sucesso!")
+        # Limpa o código da URL
+        st.query_params.clear()
+        st.rerun()
+    else:
+        st.error("❌ Erro na autenticação. Tente novamente.")
+
+# Tenta carregar tokens salvos
+if not st.session_state.access_token:
+    tokens = carregar_tokens()
+    if tokens:
+        st.success("✅ Token carregado automaticamente!")
+
+# Sidebar - Autenticação
 with st.sidebar:
-    st.header("⚙️ Configurações")
+    st.header("🔐 Autenticação")
     
-    access_token = st.text_input(
-        "Token de Acesso",
-        type="password",
-        value="4mEXUZ9W8PiLhxqtLQFcDlu29iKoSN2o",
-        help="Insira seu token de acesso do RD Station"
-    )
+    if st.session_state.access_token:
+        st.success("✅ Autenticado")
+        
+        if st.session_state.token_expiry:
+            tempo_restante = st.session_state.token_expiry - datetime.now()
+            horas = int(tempo_restante.total_seconds() // 3600)
+            minutos = int((tempo_restante.total_seconds() % 3600) // 60)
+            st.info(f"⏱️ Token expira em: {horas}h {minutos}m")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Renovar Token", use_container_width=True):
+                tokens = carregar_tokens()
+        with col2:
+            if st.button("🚪 Sair", use_container_width=True):
+                if os.path.exists(TOKEN_FILE):
+                    os.remove(TOKEN_FILE)
+                st.session_state.access_token = None
+                st.session_state.token_expiry = None
+                st.rerun()
+    else:
+        st.warning("⚠️ Não autenticado")
+        
+        st.markdown("### Como autenticar:")
+        st.markdown("1. Clique no botão abaixo")
+        st.markdown("2. Faça login no RD Station")
+        st.markdown("3. Autorize o aplicativo")
+        st.markdown("4. Você será redirecionado de volta")
+        
+        auth_url = get_authorization_url()
+        st.markdown(f'<a href="{auth_url}" target="_blank"><button style="width:100%; padding:0.5rem; background-color:#1f77b4; color:white; border:none; border-radius:4px; cursor:pointer;">🔑 Autorizar no RD Station</button></a>', unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # Opção manual (fallback)
+        with st.expander("⚙️ Configuração Manual (Avançado)"):
+            manual_token = st.text_input(
+                "Access Token Manual",
+                type="password",
+                help="Use apenas se a autenticação OAuth não funcionar"
+            )
+            if manual_token and st.button("Usar Token Manual"):
+                st.session_state.access_token = manual_token
+                st.session_state.token_expiry = datetime.now() + timedelta(hours=24)
+                st.rerun()
     
     st.divider()
     
-    if access_token:
-        # Busca organizações
+    # Configurações de busca (apenas se autenticado)
+    if st.session_state.access_token:
+        st.header("⚙️ Filtros de Busca")
+        
+        # Verifica e renova token se necessário
+        verificar_e_renovar_token()
+        
         if st.button("🔄 Carregar Organizações e Pipelines", use_container_width=True):
             with st.spinner("Carregando..."):
-                st.session_state.organizations = buscar_organizations(access_token)
-                st.session_state.pipelines = buscar_pipelines(access_token)
+                st.session_state.organizations = buscar_organizations(st.session_state.access_token)
+                st.session_state.pipelines = buscar_pipelines(st.session_state.access_token)
                 st.success("✓ Dados carregados!")
         
         st.divider()
@@ -273,7 +491,7 @@ with st.sidebar:
             
             # Filtro de Stage
             if pipeline_selected:
-                stages = buscar_stages(access_token, pipeline_selected)
+                stages = buscar_stages(st.session_state.access_token, pipeline_selected)
                 if stages:
                     stage_options = {s['id']: s['name'] for s in stages}
                     stage_selected = st.selectbox(
@@ -309,22 +527,23 @@ with st.sidebar:
             value=200,
             help="Limite de deals para processar"
         )
-    else:
-        st.warning("⚠️ Insira o token de acesso")
 
 # Área principal
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.header("🎯 Buscar e Baixar Holerites")
+if not st.session_state.access_token:
+    st.markdown('<div class="info-box">👈 Faça login usando a barra lateral para começar</div>', unsafe_allow_html=True)
+else:
+    col1, col2 = st.columns([2, 1])
     
-    if access_token:
+    with col1:
+        st.header("🎯 Buscar e Baixar Holerites")
+        
         if st.button("🚀 Iniciar Busca de Deals", type="primary", use_container_width=True):
+            verificar_e_renovar_token()
             st.session_state.processando = True
             
             # Busca deals
             deals = listar_deals(
-                access_token,
+                st.session_state.access_token,
                 pipeline_id=pipeline_selected if pipeline_selected else None,
                 stage_id=stage_selected if stage_selected else None,
                 organization_id=org_selected if org_selected else None
@@ -357,6 +576,7 @@ with col1:
             
             # Botão para baixar holerites
             if st.button("📥 Baixar Holerites dos Deals Selecionados", type="primary", use_container_width=True):
+                verificar_e_renovar_token()
                 st.session_state.holerites_baixados = []
                 
                 progress_bar = st.progress(0)
@@ -370,7 +590,7 @@ with col1:
                     
                     status_text.text(f"Processando {idx}/{total_deals}: {deal_name}")
                     
-                    holerites = baixar_holerites_deal(access_token, deal_id)
+                    holerites = baixar_holerites_deal(st.session_state.access_token, deal_id)
                     st.session_state.holerites_baixados.extend(holerites)
                     
                     progress_bar.progress(idx / total_deals)
@@ -383,22 +603,20 @@ with col1:
                     st.markdown(f'<div class="success-box">🎉 {len(st.session_state.holerites_baixados)} holerites baixados com sucesso!</div>', unsafe_allow_html=True)
                 else:
                     st.markdown('<div class="warning-box">⚠️ Nenhum holerite encontrado nos deals selecionados</div>', unsafe_allow_html=True)
-    else:
-        st.info("👈 Configure o token de acesso na barra lateral para começar")
-
-with col2:
-    st.header("📊 Estatísticas")
     
-    # Métricas
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.metric("Deals", len(st.session_state.deals_filtrados))
-    with col_b:
-        st.metric("Holerites", len(st.session_state.holerites_baixados))
-    
-    if st.session_state.holerites_baixados:
-        total_size = sum(h['tamanho'] for h in st.session_state.holerites_baixados)
-        st.metric("Tamanho Total", f"{total_size / (1024*1024):.2f} MB")
+    with col2:
+        st.header("📊 Estatísticas")
+        
+        # Métricas
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.metric("Deals", len(st.session_state.deals_filtrados))
+        with col_b:
+            st.metric("Holerites", len(st.session_state.holerites_baixados))
+        
+        if st.session_state.holerites_baixados:
+            total_size = sum(h['tamanho'] for h in st.session_state.holerites_baixados)
+            st.metric("Tamanho Total", f"{total_size / (1024*1024):.2f} MB")
 
 # Área de download
 if st.session_state.holerites_baixados:
@@ -435,6 +653,7 @@ if st.session_state.holerites_baixados:
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #666; padding: 1rem;">
+        🔐 <b>Segurança:</b> Seus tokens são armazenados localmente e renovados automaticamente<br>
         💡 <b>Dica:</b> Use os filtros na barra lateral para encontrar deals específicos<br>
         📄 Os holerites são identificados automaticamente por palavras-chave no nome do arquivo
     </div>
