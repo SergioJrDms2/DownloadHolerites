@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 import zipfile
 import io
 import json
-from pathlib import Path
 
 # Configuração da página
 st.set_page_config(
@@ -17,9 +16,27 @@ st.set_page_config(
 
 # Configurações OAuth2
 CLIENT_ID = "43462960-54de-43a7-b09c-ba3e6df8c558"
-CLIENT_SECRET = st.secrets.get("RD_CLIENT_SECRET", "")  # Coloque no secrets.toml
-REDIRECT_URI = "http://localhost:8501"  # Porta padrão do Streamlit
+CLIENT_SECRET = "5723af5317844849a9f45a1c8622c48f"
 TOKEN_FILE = "rd_tokens.json"
+
+# Detecta automaticamente a URL do Streamlit
+def get_redirect_uri():
+    """Detecta a URL atual do Streamlit"""
+    try:
+        # Tenta pegar do headers
+        headers = st.context.headers
+        if headers and 'host' in headers:
+            host = headers['host']
+            # Verifica se é HTTPS ou HTTP
+            protocol = 'https' if '443' in str(headers.get('x-forwarded-port', '')) or 'github.dev' in host else 'http'
+            return f"{protocol}://{host}"
+    except:
+        pass
+    
+    # Fallback para localhost
+    return "http://localhost:8501"
+
+REDIRECT_URI = get_redirect_uri()
 
 # CSS customizado
 st.markdown("""
@@ -59,6 +76,13 @@ st.markdown("""
         border-radius: 4px;
         margin: 1rem 0;
     }
+    .code-box {
+        background-color: #f4f4f4;
+        padding: 0.5rem;
+        border-radius: 4px;
+        font-family: monospace;
+        border: 1px solid #ddd;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -95,7 +119,6 @@ def salvar_tokens(access_token, refresh_token, expires_in):
     with open(TOKEN_FILE, 'w') as f:
         json.dump(tokens, f)
     
-    # Atualiza session state
     st.session_state.access_token = access_token
     st.session_state.token_expiry = datetime.fromisoformat(tokens['expires_at'])
 
@@ -110,13 +133,11 @@ def carregar_tokens():
         
         expiry = datetime.fromisoformat(tokens['expires_at'])
         
-        # Verifica se o token ainda é válido (com margem de 5 minutos)
         if expiry > datetime.now() + timedelta(minutes=5):
             st.session_state.access_token = tokens['access_token']
             st.session_state.token_expiry = expiry
             return tokens
         else:
-            # Token expirado, tenta refresh
             return refresh_access_token(tokens['refresh_token'])
     except Exception as e:
         st.error(f"Erro ao carregar tokens: {e}")
@@ -124,18 +145,27 @@ def carregar_tokens():
 
 def obter_access_token(authorization_code):
     """Obtém access token usando o código de autorização"""
-    url = "https://api.rd.services/auth/token"
+    url = "https://api.rd.services/oauth2/token"
     
     payload = {
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
         'code': authorization_code,
-        'redirect_uri': REDIRECT_URI
+        'redirect_uri': REDIRECT_URI,
+        'grant_type': 'authorization_code'
+    }
+    
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
     }
     
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
+        response = requests.post(url, data=payload, headers=headers)
+        
+        if response.status_code != 200:
+            st.error(f"❌ Status: {response.status_code}")
+            st.error(f"Resposta: {response.text}")
+            return None
         
         data = response.json()
         
@@ -147,24 +177,35 @@ def obter_access_token(authorization_code):
         
         return data
     except Exception as e:
-        st.error(f"Erro ao obter access token: {e}")
+        st.error(f"❌ Erro ao obter access token: {e}")
         if hasattr(e, 'response'):
             st.error(f"Resposta: {e.response.text}")
         return None
 
 def refresh_access_token(refresh_token):
     """Atualiza o access token usando refresh token"""
-    url = "https://api.rd.services/auth/token"
+    url = "https://api.rd.services/oauth2/token"
     
     payload = {
         'client_id': CLIENT_ID,
         'client_secret': CLIENT_SECRET,
-        'refresh_token': refresh_token
+        'refresh_token': refresh_token,
+        'grant_type': 'refresh_token'
+    }
+    
+    headers = {
+        'Content-Type': 'application/x-www-form-urlencoded'
     }
     
     try:
-        response = requests.post(url, json=payload)
-        response.raise_for_status()
+        response = requests.post(url, data=payload, headers=headers)
+        
+        if response.status_code != 200:
+            if os.path.exists(TOKEN_FILE):
+                os.remove(TOKEN_FILE)
+            st.session_state.access_token = None
+            st.session_state.token_expiry = None
+            return None
         
         data = response.json()
         
@@ -174,13 +215,8 @@ def refresh_access_token(refresh_token):
             data['expires_in']
         )
         
-        st.success("✓ Token atualizado com sucesso!")
         return data
     except Exception as e:
-        st.error(f"Erro ao atualizar token: {e}")
-        if hasattr(e, 'response'):
-            st.error(f"Resposta: {e.response.text}")
-        # Remove tokens inválidos
         if os.path.exists(TOKEN_FILE):
             os.remove(TOKEN_FILE)
         st.session_state.access_token = None
@@ -188,11 +224,10 @@ def refresh_access_token(refresh_token):
         return None
 
 def verificar_e_renovar_token():
-    """Verifica se o token precisa ser renovado e renova se necessário"""
+    """Verifica se o token precisa ser renovado"""
     if not st.session_state.token_expiry:
         return False
     
-    # Se faltam menos de 10 minutos para expirar, renova
     if st.session_state.token_expiry < datetime.now() + timedelta(minutes=10):
         tokens = carregar_tokens()
         return tokens is not None
@@ -212,8 +247,6 @@ def fazer_requisicao_com_retry(url, headers, params=None, max_tentativas=3):
             response = requests.get(url, headers=headers, params=params)
             
             if response.status_code == 401:
-                # Token expirado, tenta renovar
-                st.warning("Token expirado, renovando...")
                 tokens = carregar_tokens()
                 if tokens:
                     headers["Authorization"] = f"Bearer {st.session_state.access_token}"
@@ -247,7 +280,7 @@ def buscar_organizations(token):
     todas_orgs = []
     pagina = 1
     
-    with st.spinner("Buscando organizações..."):
+    with st.spinner("🔍 Buscando organizações..."):
         while True:
             params = {"page[number]": pagina, "page[size]": 100}
             try:
@@ -267,7 +300,7 @@ def buscar_organizations(token):
                 pagina += 1
                 time.sleep(0.5)
             except Exception as e:
-                st.error(f"Erro ao buscar organizações: {e}")
+                st.error(f"❌ Erro ao buscar organizações: {e}")
                 break
     
     return todas_orgs
@@ -282,7 +315,7 @@ def buscar_pipelines(token):
         if response:
             return response.json().get('data', [])
     except Exception as e:
-        st.error(f"Erro ao buscar pipelines: {e}")
+        st.error(f"❌ Erro ao buscar pipelines: {e}")
     return []
 
 def buscar_stages(token, pipeline_id):
@@ -295,7 +328,7 @@ def buscar_stages(token, pipeline_id):
         if response:
             return response.json().get('data', [])
     except Exception as e:
-        st.error(f"Erro ao buscar stages: {e}")
+        st.error(f"❌ Erro ao buscar stages: {e}")
     return []
 
 def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
@@ -324,7 +357,7 @@ def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
             deals_pagina = dados['data']
             todos_deals.extend(deals_pagina)
             
-            status_text.text(f"Buscando deals... Página {pagina} ({len(todos_deals)} deals)")
+            status_text.text(f"🔍 Buscando deals... Página {pagina} ({len(todos_deals)} deals)")
             
             if not dados.get('links', {}).get('next'):
                 break
@@ -333,13 +366,12 @@ def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
             time.sleep(0.5)
             
         except Exception as e:
-            st.error(f"Erro ao listar deals: {e}")
+            st.error(f"❌ Erro ao listar deals: {e}")
             break
     
     progress_bar.progress(100)
-    status_text.text(f"✓ {len(todos_deals)} deals encontrados")
+    status_text.text(f"✅ {len(todos_deals)} deals encontrados")
     
-    # Aplica filtros
     deals_filtrados = todos_deals
     
     if pipeline_id:
@@ -370,7 +402,6 @@ def baixar_holerites_deal(token, deal_id):
         for arquivo in arquivos:
             nome = arquivo.get('name', '')
             if eh_holerite(nome):
-                # Baixa o arquivo
                 url_arquivo = arquivo.get('url')
                 try:
                     resp = requests.get(url_arquivo, stream=True)
@@ -383,7 +414,7 @@ def baixar_holerites_deal(token, deal_id):
                         'tamanho': len(resp.content)
                     })
                 except Exception as e:
-                    st.warning(f"Erro ao baixar {nome}: {e}")
+                    st.warning(f"⚠️ Erro ao baixar {nome}: {e}")
         
         return holerites
     except Exception as e:
@@ -393,19 +424,35 @@ def baixar_holerites_deal(token, deal_id):
 
 st.markdown('<div class="main-header">📄 Download de Holerites - RD Station CRM</div>', unsafe_allow_html=True)
 
-# Verifica se há código de autorização na URL
+# ✨ DETECÇÃO AUTOMÁTICA DO CÓDIGO ✨
 query_params = st.query_params
 if 'code' in query_params and not st.session_state.access_token:
     code = query_params['code']
-    st.info("🔄 Processando autorização...")
-    resultado = obter_access_token(code)
+    
+    with st.spinner("🔄 Processando autorização automaticamente..."):
+        resultado = obter_access_token(code)
+        
     if resultado:
         st.success("✅ Autenticação realizada com sucesso!")
+        st.balloons()
         # Limpa o código da URL
         st.query_params.clear()
+        time.sleep(1)
         st.rerun()
     else:
-        st.error("❌ Erro na autenticação. Tente novamente.")
+        st.error("❌ Erro na autenticação.")
+        with st.expander("🔧 Possíveis soluções"):
+            st.markdown(f"""
+            **Verifique se a URL de redirecionamento está configurada no RD Station:**
+            
+            1. Acesse: https://app.rdstation.com.br/integracoes/aplicacoes
+            2. Selecione sua aplicação
+            3. Verifique se esta URL está cadastrada:
+            
+            <div class="code-box">{REDIRECT_URI}</div>
+            
+            **Se não estiver, adicione-a e tente novamente.**
+            """, unsafe_allow_html=True)
 
 # Tenta carregar tokens salvos
 if not st.session_state.access_token:
@@ -413,7 +460,7 @@ if not st.session_state.access_token:
     if tokens:
         st.success("✅ Token carregado automaticamente!")
 
-# Sidebar - Autenticação
+# Sidebar
 with st.sidebar:
     st.header("🔐 Autenticação")
     
@@ -428,8 +475,12 @@ with st.sidebar:
         
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("🔄 Renovar Token", use_container_width=True):
+            if st.button("🔄 Renovar", use_container_width=True):
                 tokens = carregar_tokens()
+                if tokens:
+                    st.success("✅ Renovado!")
+                    time.sleep(1)
+                    st.rerun()
         with col2:
             if st.button("🚪 Sair", use_container_width=True):
                 if os.path.exists(TOKEN_FILE):
@@ -440,47 +491,54 @@ with st.sidebar:
     else:
         st.warning("⚠️ Não autenticado")
         
-        st.markdown("### Como autenticar:")
-        st.markdown("1. Clique no botão abaixo")
-        st.markdown("2. Faça login no RD Station")
-        st.markdown("3. Autorize o aplicativo")
-        st.markdown("4. Você será redirecionado de volta")
+        st.markdown("### 🚀 Início Rápido:")
+        st.markdown("**Clique no botão abaixo e autorize.**")
+        st.markdown("O resto é **automático**! ✨")
         
         auth_url = get_authorization_url()
-        st.markdown(f'<a href="{auth_url}" target="_blank"><button style="width:100%; padding:0.5rem; background-color:#1f77b4; color:white; border:none; border-radius:4px; cursor:pointer;">🔑 Autorizar no RD Station</button></a>', unsafe_allow_html=True)
+        
+        # Botão grande de autorização
+        st.markdown(f'<a href="{auth_url}" target="_self"><button style="width:100%; padding:1rem; background-color:#28a745; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:1.1rem;">🔑 Autorizar no RD Station</button></a>', unsafe_allow_html=True)
         
         st.divider()
         
-        # Opção manual (fallback)
-        with st.expander("⚙️ Configuração Manual (Avançado)"):
-            manual_token = st.text_input(
-                "Access Token Manual",
-                type="password",
-                help="Use apenas se a autenticação OAuth não funcionar"
-            )
-            if manual_token and st.button("Usar Token Manual"):
-                st.session_state.access_token = manual_token
-                st.session_state.token_expiry = datetime.now() + timedelta(hours=24)
-                st.rerun()
+        # Informações de configuração
+        with st.expander("⚙️ Configuração (primeira vez)"):
+            st.markdown("""
+            **Antes de usar pela primeira vez, configure no RD Station:**
+            
+            1. Acesse: https://app.rdstation.com.br/integracoes/aplicacoes
+            2. Clique em "Nova Aplicação" (ou edite a existente)
+            3. Adicione esta URL de redirecionamento:
+            """)
+            
+            st.code(REDIRECT_URI, language=None)
+            
+            st.markdown("""
+            4. Salve e volte aqui
+            5. Clique no botão verde acima
+            
+            **Depois disso, tudo funciona automaticamente!** 🎉
+            """)
     
     st.divider()
     
-    # Configurações de busca (apenas se autenticado)
+    # Filtros (apenas se autenticado)
     if st.session_state.access_token:
-        st.header("⚙️ Filtros de Busca")
+        st.header("⚙️ Filtros")
         
-        # Verifica e renova token se necessário
         verificar_e_renovar_token()
         
-        if st.button("🔄 Carregar Organizações e Pipelines", use_container_width=True):
+        if st.button("🔄 Carregar Dados", use_container_width=True):
             with st.spinner("Carregando..."):
                 st.session_state.organizations = buscar_organizations(st.session_state.access_token)
                 st.session_state.pipelines = buscar_pipelines(st.session_state.access_token)
-                st.success("✓ Dados carregados!")
+                st.success("✅ Carregado!")
         
         st.divider()
         
-        # Filtro de Pipeline
+        pipeline_selected = None
+        stage_selected = None
         if 'pipelines' in st.session_state and st.session_state.pipelines:
             pipeline_options = {p['id']: p['name'] for p in st.session_state.pipelines}
             pipeline_selected = st.selectbox(
@@ -489,7 +547,6 @@ with st.sidebar:
                 format_func=lambda x: "Todos" if x == '' else pipeline_options.get(x, x)
             )
             
-            # Filtro de Stage
             if pipeline_selected:
                 stages = buscar_stages(st.session_state.access_token, pipeline_selected)
                 if stages:
@@ -499,24 +556,15 @@ with st.sidebar:
                         options=[''] + list(stage_options.keys()),
                         format_func=lambda x: "Todos" if x == '' else stage_options.get(x, x)
                     )
-                else:
-                    stage_selected = None
-            else:
-                stage_selected = None
-        else:
-            pipeline_selected = None
-            stage_selected = None
         
-        # Filtro de Organização
+        org_selected = None
         if 'organizations' in st.session_state and st.session_state.organizations:
             org_options = {o['id']: o['name'] for o in st.session_state.organizations}
             org_selected = st.selectbox(
-                "Organização (Prefeitura)",
+                "Organização",
                 options=[''] + list(org_options.keys()),
                 format_func=lambda x: "Todas" if x == '' else org_options.get(x, x)
             )
-        else:
-            org_selected = None
         
         st.divider()
         
@@ -524,24 +572,40 @@ with st.sidebar:
             "Máximo de Deals",
             min_value=1,
             max_value=1000,
-            value=200,
-            help="Limite de deals para processar"
+            value=200
         )
 
 # Área principal
 if not st.session_state.access_token:
-    st.markdown('<div class="info-box">👈 Faça login usando a barra lateral para começar</div>', unsafe_allow_html=True)
+    st.markdown('<div class="info-box">👈 <b>Clique no botão verde na barra lateral para começar!</b></div>', unsafe_allow_html=True)
+    
+    st.markdown("### ✨ Como funciona:")
+    st.markdown("1. 🔑 Clique em 'Autorizar no RD Station'")
+    st.markdown("2. 🌐 Faça login e autorize")
+    st.markdown("3. ✅ **Pronto!** Você volta aqui automaticamente")
+    st.markdown("4. 📥 Comece a baixar holerites")
+    
+    st.divider()
+    
+    st.markdown("### 🎯 Recursos:")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("✅ Autenticação automática OAuth2")
+        st.markdown("✅ Filtros por pipeline e stage")
+        st.markdown("✅ Download automático de holerites")
+    with col2:
+        st.markdown("✅ Renovação automática de tokens")
+        st.markdown("✅ Download em arquivo ZIP")
+        st.markdown("✅ Identificação inteligente de holerites")
 else:
     col1, col2 = st.columns([2, 1])
     
     with col1:
-        st.header("🎯 Buscar e Baixar Holerites")
+        st.header("🎯 Buscar e Baixar")
         
-        if st.button("🚀 Iniciar Busca de Deals", type="primary", use_container_width=True):
+        if st.button("🚀 Buscar Deals", type="primary", use_container_width=True):
             verificar_e_renovar_token()
-            st.session_state.processando = True
             
-            # Busca deals
             deals = listar_deals(
                 st.session_state.access_token,
                 pipeline_id=pipeline_selected if pipeline_selected else None,
@@ -549,112 +613,93 @@ else:
                 organization_id=org_selected if org_selected else None
             )
             
-            # Limita quantidade
             deals = deals[:max_deals]
-            
             st.session_state.deals_filtrados = deals
-            st.session_state.processando = False
             
             if deals:
-                st.markdown(f'<div class="success-box">✓ {len(deals)} deals encontrados e prontos para processamento!</div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="success-box">✅ {len(deals)} deals prontos!</div>', unsafe_allow_html=True)
             else:
-                st.markdown('<div class="warning-box">⚠️ Nenhum deal encontrado com os filtros aplicados</div>', unsafe_allow_html=True)
+                st.markdown('<div class="warning-box">⚠️ Nenhum deal encontrado</div>', unsafe_allow_html=True)
         
-        # Mostra deals encontrados
         if st.session_state.deals_filtrados:
             st.divider()
-            st.subheader(f"📋 {len(st.session_state.deals_filtrados)} Deals Encontrados")
+            st.subheader(f"📋 {len(st.session_state.deals_filtrados)} Deals")
             
-            # Preview dos deals
-            with st.expander("Ver lista de deals"):
+            with st.expander("👁️ Ver lista"):
                 for i, deal in enumerate(st.session_state.deals_filtrados[:20], 1):
-                    st.text(f"{i}. {deal.get('name', 'Sem nome')} (ID: {deal.get('id')})")
+                    st.text(f"{i}. {deal.get('name', 'Sem nome')}")
                 if len(st.session_state.deals_filtrados) > 20:
-                    st.text(f"... e mais {len(st.session_state.deals_filtrados) - 20} deals")
+                    st.text(f"... +{len(st.session_state.deals_filtrados) - 20}")
             
             st.divider()
             
-            # Botão para baixar holerites
-            if st.button("📥 Baixar Holerites dos Deals Selecionados", type="primary", use_container_width=True):
+            if st.button("📥 Baixar Holerites", type="primary", use_container_width=True):
                 verificar_e_renovar_token()
                 st.session_state.holerites_baixados = []
                 
                 progress_bar = st.progress(0)
                 status_text = st.empty()
                 
-                total_deals = len(st.session_state.deals_filtrados)
+                total = len(st.session_state.deals_filtrados)
                 
                 for idx, deal in enumerate(st.session_state.deals_filtrados, 1):
-                    deal_id = deal.get('id')
-                    deal_name = deal.get('name', 'Sem nome')
+                    status_text.text(f"📄 {idx}/{total}: {deal.get('name', 'Sem nome')}")
                     
-                    status_text.text(f"Processando {idx}/{total_deals}: {deal_name}")
-                    
-                    holerites = baixar_holerites_deal(st.session_state.access_token, deal_id)
+                    holerites = baixar_holerites_deal(st.session_state.access_token, deal.get('id'))
                     st.session_state.holerites_baixados.extend(holerites)
                     
-                    progress_bar.progress(idx / total_deals)
+                    progress_bar.progress(idx / total)
                     time.sleep(0.5)
                 
-                status_text.text(f"✓ Processamento concluído!")
+                status_text.text(f"✅ Concluído!")
                 progress_bar.progress(100)
                 
                 if st.session_state.holerites_baixados:
-                    st.markdown(f'<div class="success-box">🎉 {len(st.session_state.holerites_baixados)} holerites baixados com sucesso!</div>', unsafe_allow_html=True)
+                    st.markdown(f'<div class="success-box">🎉 {len(st.session_state.holerites_baixados)} holerites baixados!</div>', unsafe_allow_html=True)
+                    st.balloons()
                 else:
-                    st.markdown('<div class="warning-box">⚠️ Nenhum holerite encontrado nos deals selecionados</div>', unsafe_allow_html=True)
+                    st.markdown('<div class="warning-box">⚠️ Nenhum holerite encontrado</div>', unsafe_allow_html=True)
     
     with col2:
         st.header("📊 Estatísticas")
-        
-        # Métricas
-        col_a, col_b = st.columns(2)
-        with col_a:
-            st.metric("Deals", len(st.session_state.deals_filtrados))
-        with col_b:
-            st.metric("Holerites", len(st.session_state.holerites_baixados))
+        st.metric("Deals", len(st.session_state.deals_filtrados))
+        st.metric("Holerites", len(st.session_state.holerites_baixados))
         
         if st.session_state.holerites_baixados:
             total_size = sum(h['tamanho'] for h in st.session_state.holerites_baixados)
-            st.metric("Tamanho Total", f"{total_size / (1024*1024):.2f} MB")
+            st.metric("Tamanho", f"{total_size / (1024*1024):.2f} MB")
 
-# Área de download
+# Download
 if st.session_state.holerites_baixados:
     st.divider()
-    st.header("📦 Download dos Holerites")
+    st.header("📦 Download")
     
-    # Cria ZIP com todos os holerites
     zip_buffer = io.BytesIO()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-        for holerite in st.session_state.holerites_baixados:
-            nome_seguro = "".join(c for c in holerite['nome'] if c.isalnum() or c in (' ', '.', '_', '-'))
-            nome_arquivo = f"{holerite['deal_id']}_{nome_seguro}"
-            zip_file.writestr(nome_arquivo, holerite['conteudo'])
+        for h in st.session_state.holerites_baixados:
+            nome_seguro = "".join(c for c in h['nome'] if c.isalnum() or c in (' ', '.', '_', '-'))
+            zip_file.writestr(f"{h['deal_id']}_{nome_seguro}", h['conteudo'])
     
     zip_buffer.seek(0)
     
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         st.download_button(
-            label="⬇️ Baixar Todos os Holerites (ZIP)",
+            label="⬇️ Baixar Todos (ZIP)",
             data=zip_buffer.getvalue(),
             file_name=f"holerites_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip",
             mime="application/zip",
             use_container_width=True
         )
     
-    # Lista de holerites baixados
-    with st.expander(f"📋 Ver lista de {len(st.session_state.holerites_baixados)} holerites"):
-        for i, holerite in enumerate(st.session_state.holerites_baixados, 1):
-            tamanho_kb = holerite['tamanho'] / 1024
-            st.text(f"{i}. {holerite['nome']} ({tamanho_kb:.1f} KB) - Deal: {holerite['deal_id']}")
+    with st.expander(f"📋 Lista de {len(st.session_state.holerites_baixados)} arquivos"):
+        for i, h in enumerate(st.session_state.holerites_baixados, 1):
+            st.text(f"{i}. {h['nome']} ({h['tamanho']/1024:.1f} KB)")
 
 # Footer
 st.divider()
 st.markdown("""
     <div style="text-align: center; color: #666; padding: 1rem;">
-        🔐 <b>Segurança:</b> Seus tokens são armazenados localmente e renovados automaticamente<br>
-        💡 <b>Dica:</b> Use os filtros na barra lateral para encontrar deals específicos<br>
-        📄 Os holerites são identificados automaticamente por palavras-chave no nome do arquivo
+        🔒 Tokens armazenados localmente • 🔄 Renovação automática • ⚡ Processo automático
     </div>
 """, unsafe_allow_html=True)
