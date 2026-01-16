@@ -15,8 +15,8 @@ st.set_page_config(
 )
 
 # Configurações OAuth2
-CLIENT_ID = "6e4c5c89-82dd-4e4e-b977-70e870d3cee8"
-CLIENT_SECRET = "3e2245eb3f234d7abc3d1cf14b40c0fb"
+CLIENT_ID = "ab2a1942-d61d-436b-a41d-0d1adb6f9ee7"
+CLIENT_SECRET = "56ea6d7b4b53405185bceee354219835"
 TOKEN_FILE = "rd_tokens.json"
 
 # Detecta automaticamente a URL do Streamlit
@@ -36,7 +36,7 @@ def get_redirect_uri():
     # Fallback para localhost
     return "http://localhost:8501"
 
-REDIRECT_URI = get_redirect_uri()
+REDIRECT_URI = "https://fluffy-tribble-7xr6pgw96pj2pvxq-8501.app.github.dev/"
 
 # CSS customizado
 st.markdown("""
@@ -101,7 +101,6 @@ if 'token_expiry' not in st.session_state:
 # Palavras-chave para holerites
 PALAVRAS_CHAVE_HOLERITE = [
     "contra cheque", "holerite", "contracheque", "folha de pagamento",
-    "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
     "janeiro", "fevereiro", "março", "marco", "abril", "maio", "junho",
     "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"
 ]
@@ -267,10 +266,16 @@ def fazer_requisicao_com_retry(url, headers, params=None, max_tentativas=3):
             time.sleep(2)
     return None
 
-def eh_holerite(nome_arquivo):
-    """Verifica se o arquivo é um holerite"""
-    nome_lower = nome_arquivo.lower()
-    return any(palavra.lower() in nome_lower for palavra in PALAVRAS_CHAVE_HOLERITE)
+def eh_holerite(nome_arquivo: str) -> bool:
+    nome = nome_arquivo.lower().strip()
+
+    # 1️⃣ Obrigatoriamente PDF
+    if not nome.endswith('.pdf'):
+        return False
+
+    # 2️⃣ Precisa conter alguma palavra-chave
+    return any(palavra in nome for palavra in PALAVRAS_CHAVE_HOLERITE)
+
 
 def buscar_organizations(token):
     """Busca todas as organizações"""
@@ -331,58 +336,147 @@ def buscar_stages(token, pipeline_id):
         st.error(f"❌ Erro ao buscar stages: {e}")
     return []
 
-def listar_deals(token, pipeline_id=None, stage_id=None, organization_id=None):
-    """Lista deals com filtros"""
+def _rdql_or(field, values):
+    values = [v for v in (values or []) if v]
+    if not values:
+        return None
+    if len(values) == 1:
+        return f"{field}:{values[0]}"
+    return "(" + " OR ".join(f"{field}:{v}" for v in values) + ")"
+
+def _rdql_and(parts):
+    parts = [p for p in (parts or []) if p]
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    return " AND ".join(parts)
+
+def build_deals_rdql_filter(pipeline_id=None, stage_ids=None, organization_ids=None):
+    parts = []
+    if pipeline_id:
+        parts.append(f"pipeline_id:{pipeline_id}")
+    parts.append(_rdql_or("stage_id", stage_ids))
+    parts.append(_rdql_or("organization_id", organization_ids))
+    return _rdql_and(parts)
+
+def listar_deals(
+    token,
+    pipeline_id=None,
+    stage_ids=None,         
+    organization_ids=None,   
+    max_paginas=10,
+    max_deals=None
+):
     url = "https://api.rd.services/crm/v2/deals"
     headers = {"Authorization": f"Bearer {token}"}
-    
-    todos_deals = []
+
+    api_filter_full = build_deals_rdql_filter(
+        pipeline_id=pipeline_id,
+        stage_ids=stage_ids,
+        organization_ids=organization_ids
+    )
+
+    api_filter_pipeline = f"pipeline_id:{pipeline_id}" if pipeline_id else None
+
+    api_filter = api_filter_full
+
+    if stage_ids and len(stage_ids) > 6:
+        api_filter = api_filter_pipeline
+
+    if organization_ids and len(organization_ids) > 6:
+        api_filter = api_filter_pipeline
+
+    if api_filter and len(api_filter) > 900:
+        api_filter = api_filter_pipeline
+
+    deals_filtrados = []
     pagina = 1
-    
+
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
-    while True:
-        params = {"page[number]": pagina, "page[size]": 200}
-        
+
+    max_paginas_efetivo = min(max_paginas, 100)
+    filtro_server_side_desativado = False
+    while pagina <= max_paginas_efetivo:
+        params = {
+            "page[number]": pagina,
+            "page[size]": 100
+        }
+
+        if api_filter and not filtro_server_side_desativado:
+            params["filter"] = api_filter
+
         try:
             response = fazer_requisicao_com_retry(url, headers, params)
             if not response:
                 break
-            
+
             dados = response.json()
-            if 'data' not in dados or not dados['data']:
+            deals_pagina = dados.get('data', [])
+
+            if not deals_pagina:
                 break
-            
-            deals_pagina = dados['data']
-            todos_deals.extend(deals_pagina)
-            
-            status_text.text(f"🔍 Buscando deals... Página {pagina} ({len(todos_deals)} deals)")
-            
+
+            deals_pagina_filtrada = deals_pagina
+
+            if pipeline_id and api_filter != f"pipeline_id:{pipeline_id}":
+                deals_pagina_filtrada = [
+                    d for d in deals_pagina_filtrada
+                    if d.get('pipeline_id') == pipeline_id
+                ]
+
+            if stage_ids:
+                stage_ids_set = set(stage_ids)
+                deals_pagina_filtrada = [
+                    d for d in deals_pagina_filtrada
+                    if d.get('stage_id') in stage_ids_set
+                ]
+
+            if organization_ids:
+                org_ids_set = set(organization_ids)
+                deals_pagina_filtrada = [
+                    d for d in deals_pagina_filtrada
+                    if d.get('organization_id') in org_ids_set
+                    if d.get('organization_id') is not None
+                ]
+
+            deals_filtrados.extend(deals_pagina_filtrada)
+
+            status_text.text(
+                f"🔍 Buscando deals... Página {pagina}/{max_paginas} "
+                f"({len(deals_filtrados)} deals)"
+            )
+
+            if max_deals and len(deals_filtrados) >= max_deals:
+                break
+
             if not dados.get('links', {}).get('next'):
                 break
-            
+
             pagina += 1
-            time.sleep(0.5)
-            
+            time.sleep(0.4)
+            progress_bar.progress(min(pagina / max_paginas_efetivo, 1.0))
+
+        except requests.exceptions.HTTPError as e:
+            status_code = getattr(getattr(e, 'response', None), 'status_code', None)
+
+            if api_filter and not filtro_server_side_desativado and (status_code in (400, 414) or (status_code and status_code >= 500)):
+                filtro_server_side_desativado = True
+                st.warning("⚠️ A API falhou ao processar o filtro RDQL. Continuando com filtro local.")
+                continue
+
+            st.error(f"❌ Erro ao listar deals: {e}")
+            break
         except Exception as e:
             st.error(f"❌ Erro ao listar deals: {e}")
             break
-    
+
     progress_bar.progress(100)
-    status_text.text(f"✅ {len(todos_deals)} deals encontrados")
-    
-    deals_filtrados = todos_deals
-    
-    if pipeline_id:
-        deals_filtrados = [d for d in deals_filtrados if d.get('pipeline_id') == pipeline_id]
-    
-    if stage_id:
-        deals_filtrados = [d for d in deals_filtrados if d.get('stage_id') == stage_id]
-    
-    if organization_id:
-        deals_filtrados = [d for d in deals_filtrados if d.get('organization_id') == organization_id]
-    
+    status_text.text(f"✅ {len(deals_filtrados)} deals carregados")
+
+    if max_deals:
+        return deals_filtrados[:max_deals]
     return deals_filtrados
 
 def baixar_holerites_deal(token, deal_id):
@@ -420,11 +514,8 @@ def baixar_holerites_deal(token, deal_id):
     except Exception as e:
         return []
 
-# ==================== INTERFACE PRINCIPAL ====================
-
 st.markdown('<div class="main-header">📄 Download de Holerites - RD Station CRM</div>', unsafe_allow_html=True)
 
-# ✨ DETECÇÃO AUTOMÁTICA DO CÓDIGO ✨
 query_params = st.query_params
 if 'code' in query_params and not st.session_state.access_token:
     code = query_params['code']
@@ -434,223 +525,122 @@ if 'code' in query_params and not st.session_state.access_token:
         
     if resultado:
         st.success("✅ Autenticação realizada com sucesso!")
-        st.balloons()
-        # Limpa o código da URL
         st.query_params.clear()
         time.sleep(1)
         st.rerun()
     else:
         st.error("❌ Erro na autenticação.")
-        with st.expander("🔧 Possíveis soluções"):
-            st.markdown(f"""
-            **Verifique se a URL de redirecionamento está configurada no RD Station:**
-            
-            1. Acesse: https://app.rdstation.com.br/integracoes/aplicacoes
-            2. Selecione sua aplicação
-            3. Verifique se esta URL está cadastrada:
-            
-            <div class="code-box">{REDIRECT_URI}</div>
-            
-            **Se não estiver, adicione-a e tente novamente.**
-            """, unsafe_allow_html=True)
 
-# Tenta carregar tokens salvos
 if not st.session_state.access_token:
-    tokens = carregar_tokens()
-    if tokens:
-        st.success("✅ Token carregado automaticamente!")
+    carregar_tokens()
 
-# Sidebar
-with st.sidebar:
-    st.header("🔐 Autenticação")
+if not st.session_state.access_token:
+    auth_url = get_authorization_url()
+    st.markdown(f"[🔐 Clique aqui para autenticar]({auth_url})")
+    st.stop()
+
+col1, col2 = st.columns([2, 1])
+
+with col1:
+    st.header("🔎 Filtros")
     
-    if st.session_state.access_token:
-        st.success("✅ Autenticado")
-        
-        if st.session_state.token_expiry:
-            tempo_restante = st.session_state.token_expiry - datetime.now()
-            horas = int(tempo_restante.total_seconds() // 3600)
-            minutos = int((tempo_restante.total_seconds() % 3600) // 60)
-            st.info(f"⏱️ Token expira em: {horas}h {minutos}m")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("🔄 Renovar", use_container_width=True):
-                tokens = carregar_tokens()
-                if tokens:
-                    st.success("✅ Renovado!")
-                    time.sleep(1)
-                    st.rerun()
-        with col2:
-            if st.button("🚪 Sair", use_container_width=True):
-                if os.path.exists(TOKEN_FILE):
-                    os.remove(TOKEN_FILE)
-                st.session_state.access_token = None
-                st.session_state.token_expiry = None
-                st.rerun()
-    else:
-        st.warning("⚠️ Não autenticado")
-        
-        st.markdown("### 🚀 Início Rápido:")
-        st.markdown("**Clique no botão abaixo e autorize.**")
-        st.markdown("O resto é **automático**! ✨")
-        
-        auth_url = get_authorization_url()
-        
-        # Botão grande de autorização
-        st.markdown(f'<a href="{auth_url}" target="_self"><button style="width:100%; padding:1rem; background-color:#28a745; color:white; border:none; border-radius:8px; cursor:pointer; font-weight:bold; font-size:1.1rem;">🔑 Autorizar no RD Station</button></a>', unsafe_allow_html=True)
-        
-        st.divider()
-        
-        # Informações de configuração
-        with st.expander("⚙️ Configuração (primeira vez)"):
-            st.markdown("""
-            **Antes de usar pela primeira vez, configure no RD Station:**
-            
-            1. Acesse: https://app.rdstation.com.br/integracoes/aplicacoes
-            2. Clique em "Nova Aplicação" (ou edite a existente)
-            3. Adicione esta URL de redirecionamento:
-            """)
-            
-            st.code(REDIRECT_URI, language=None)
-            
-            st.markdown("""
-            4. Salve e volte aqui
-            5. Clique no botão verde acima
-            
-            **Depois disso, tudo funciona automaticamente!** 🎉
-            """)
+    pipelines = buscar_pipelines(st.session_state.access_token)
+    pipeline_map = {p.get('name', p.get('id')): p.get('id') for p in pipelines}
+    pipeline_names = ["(Todos)"] + sorted(pipeline_map.keys())
+    pipeline_name = st.selectbox("Pipeline", pipeline_names)
+    pipeline_selected = None if pipeline_name == "(Todos)" else pipeline_map.get(pipeline_name)
     
-    st.divider()
+    stages = buscar_stages(st.session_state.access_token, pipeline_selected) if pipeline_selected else []
+    stage_map = {s.get('name', s.get('id')): s.get('id') for s in stages}
+    stage_names = sorted(stage_map.keys())
+    stage_selected_names = st.multiselect("Estágio", stage_names)
+    stage_selected = [stage_map[n] for n in stage_selected_names] if stage_selected_names else None
+
+    if 'orgs_cache' not in st.session_state:
+        st.session_state.orgs_cache = []
+
+    if not st.session_state.orgs_cache:
+        orgs = buscar_organizations(st.session_state.access_token)
+        if orgs:
+            st.session_state.orgs_cache = orgs
+
+    orgs = st.session_state.orgs_cache
+    org_id_to_name = {
+        o.get('id'): (o.get('name') or o.get('id'))
+        for o in orgs
+        if o.get('id')
+    }
+    org_ids = sorted(org_id_to_name.keys(), key=lambda oid: (org_id_to_name.get(oid) or '').lower())
+    org_selected = st.multiselect(
+        "Organização",
+        org_ids,
+        format_func=lambda oid: org_id_to_name.get(oid, oid),
+        key="org_selected_ids"
+    )
     
-    # Filtros (apenas se autenticado)
-    if st.session_state.access_token:
-        st.header("⚙️ Filtros")
-        
+    max_paginas = st.number_input("Máx. páginas", min_value=1, max_value=100, value=10)
+    max_deals = st.number_input("Máx. deals", min_value=1, value=200)
+    
+    if st.button("🚀 Buscar Deals", type="primary", use_container_width=True):
         verificar_e_renovar_token()
         
-        if st.button("🔄 Carregar Dados", use_container_width=True):
-            with st.spinner("Carregando..."):
-                st.session_state.organizations = buscar_organizations(st.session_state.access_token)
-                st.session_state.pipelines = buscar_pipelines(st.session_state.access_token)
-                st.success("✅ Carregado!")
-        
-        st.divider()
-        
-        pipeline_selected = None
-        stage_selected = None
-        if 'pipelines' in st.session_state and st.session_state.pipelines:
-            pipeline_options = {p['id']: p['name'] for p in st.session_state.pipelines}
-            pipeline_selected = st.selectbox(
-                "Pipeline",
-                options=[''] + list(pipeline_options.keys()),
-                format_func=lambda x: "Todos" if x == '' else pipeline_options.get(x, x)
-            )
-            
-            if pipeline_selected:
-                stages = buscar_stages(st.session_state.access_token, pipeline_selected)
-                if stages:
-                    stage_options = {s['id']: s['name'] for s in stages}
-                    stage_selected = st.selectbox(
-                        "Stage",
-                        options=[''] + list(stage_options.keys()),
-                        format_func=lambda x: "Todos" if x == '' else stage_options.get(x, x)
-                    )
-        
-        org_selected = None
-        if 'organizations' in st.session_state and st.session_state.organizations:
-            org_options = {o['id']: o['name'] for o in st.session_state.organizations}
-            org_selected = st.selectbox(
-                "Organização",
-                options=[''] + list(org_options.keys()),
-                format_func=lambda x: "Todas" if x == '' else org_options.get(x, x)
-            )
-        
-        st.divider()
-        
-        max_deals = st.number_input(
-            "Máximo de Deals",
-            min_value=1,
-            max_value=1000,
-            value=200
+        deals = listar_deals(
+            st.session_state.access_token,
+            pipeline_id=pipeline_selected if pipeline_selected else None,
+            stage_ids=stage_selected if stage_selected else None,
+            organization_ids=org_selected if org_selected else None,
+            max_paginas=max_paginas,
+            max_deals=max_deals
         )
+        st.session_state.deals_filtrados = deals
+        st.session_state.holerites_baixados = []
 
-# Área principal
-if not st.session_state.access_token:
-    st.markdown('<div class="info-box">👈 <b>Clique no botão verde na barra lateral para começar!</b></div>', unsafe_allow_html=True)
-    
-   
-else:
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.header("🎯 Buscar e Baixar")
+    if st.session_state.deals_filtrados:
+        st.divider()
+        st.subheader(f"📋 {len(st.session_state.deals_filtrados)} Deals")
         
-        if st.button("🚀 Buscar Deals", type="primary", use_container_width=True):
+        with st.expander("Ver lista"):
+            for i, deal in enumerate(st.session_state.deals_filtrados[:20], 1):
+                st.text(f"{i}. {deal.get('name', 'Sem nome')}")
+            if len(st.session_state.deals_filtrados) > 20:
+                st.text(f"... +{len(st.session_state.deals_filtrados) - 20}")
+        
+        st.divider()
+        
+        if st.button("📥 Baixar Holerites", type="primary", use_container_width=True):
             verificar_e_renovar_token()
+            st.session_state.holerites_baixados = []
             
-            deals = listar_deals(
-                st.session_state.access_token,
-                pipeline_id=pipeline_selected if pipeline_selected else None,
-                stage_id=stage_selected if stage_selected else None,
-                organization_id=org_selected if org_selected else None
-            )
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            deals = deals[:max_deals]
-            st.session_state.deals_filtrados = deals
+            total = len(st.session_state.deals_filtrados)
             
-            if deals:
-                st.markdown(f'<div class="success-box">✅ {len(deals)} deals prontos!</div>', unsafe_allow_html=True)
+            for idx, deal in enumerate(st.session_state.deals_filtrados, 1):
+                status_text.text(f"📄 {idx}/{total}: {deal.get('name', 'Sem nome')}")
+                
+                holerites = baixar_holerites_deal(st.session_state.access_token, deal.get('id'))
+                st.session_state.holerites_baixados.extend(holerites)
+                
+                progress_bar.progress(idx / total)
+                time.sleep(0.5)
+            
+            status_text.text(f"✅ Concluído!")
+            progress_bar.progress(100)
+            
+            if st.session_state.holerites_baixados:
+                st.markdown(f'<div class="success-box">🎉 {len(st.session_state.holerites_baixados)} holerites baixados!</div>', unsafe_allow_html=True)
             else:
-                st.markdown('<div class="warning-box">⚠️ Nenhum deal encontrado</div>', unsafe_allow_html=True)
-        
-        if st.session_state.deals_filtrados:
-            st.divider()
-            st.subheader(f"📋 {len(st.session_state.deals_filtrados)} Deals")
-            
-            with st.expander("👁️ Ver lista"):
-                for i, deal in enumerate(st.session_state.deals_filtrados[:20], 1):
-                    st.text(f"{i}. {deal.get('name', 'Sem nome')}")
-                if len(st.session_state.deals_filtrados) > 20:
-                    st.text(f"... +{len(st.session_state.deals_filtrados) - 20}")
-            
-            st.divider()
-            
-            if st.button("📥 Baixar Holerites", type="primary", use_container_width=True):
-                verificar_e_renovar_token()
-                st.session_state.holerites_baixados = []
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                total = len(st.session_state.deals_filtrados)
-                
-                for idx, deal in enumerate(st.session_state.deals_filtrados, 1):
-                    status_text.text(f"📄 {idx}/{total}: {deal.get('name', 'Sem nome')}")
-                    
-                    holerites = baixar_holerites_deal(st.session_state.access_token, deal.get('id'))
-                    st.session_state.holerites_baixados.extend(holerites)
-                    
-                    progress_bar.progress(idx / total)
-                    time.sleep(0.5)
-                
-                status_text.text(f"✅ Concluído!")
-                progress_bar.progress(100)
-                
-                if st.session_state.holerites_baixados:
-                    st.markdown(f'<div class="success-box">🎉 {len(st.session_state.holerites_baixados)} holerites baixados!</div>', unsafe_allow_html=True)
-                    st.balloons()
-                else:
-                    st.markdown('<div class="warning-box">⚠️ Nenhum holerite encontrado</div>', unsafe_allow_html=True)
+                st.markdown('<div class="warning-box">⚠️ Nenhum holerite encontrado</div>', unsafe_allow_html=True)
+
+with col2:
+    st.header("📊 Estatísticas")
+    st.metric("Deals", len(st.session_state.deals_filtrados))
+    st.metric("Holerites", len(st.session_state.holerites_baixados))
     
-    with col2:
-        st.header("📊 Estatísticas")
-        st.metric("Deals", len(st.session_state.deals_filtrados))
-        st.metric("Holerites", len(st.session_state.holerites_baixados))
-        
-        if st.session_state.holerites_baixados:
-            total_size = sum(h['tamanho'] for h in st.session_state.holerites_baixados)
-            st.metric("Tamanho", f"{total_size / (1024*1024):.2f} MB")
+    if st.session_state.holerites_baixados:
+        total_size = sum(h['tamanho'] for h in st.session_state.holerites_baixados)
+        st.metric("Tamanho", f"{total_size / (1024*1024):.2f} MB")
 
 # Download
 if st.session_state.holerites_baixados:
