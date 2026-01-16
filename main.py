@@ -15,8 +15,8 @@ st.set_page_config(
 )
 
 # Configurações OAuth2
-CLIENT_ID = "9ae864fd-5a3f-40c9-9c6b-ed0ea89eed0e"
-CLIENT_SECRET = "4a8d1b03c03548c2b2ad2d3473141c6c"
+CLIENT_ID = "6e4c5c89-82dd-4e4e-b977-70e870d3cee8"
+CLIENT_SECRET = "3e2245eb3f234d7abc3d1cf14b40c0fb"
 TOKEN_FILE = "rd_tokens.json"
 
 # Detecta automaticamente a URL do Streamlit
