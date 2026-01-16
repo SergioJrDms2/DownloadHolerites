@@ -579,24 +579,7 @@ with st.sidebar:
 if not st.session_state.access_token:
     st.markdown('<div class="info-box">👈 <b>Clique no botão verde na barra lateral para começar!</b></div>', unsafe_allow_html=True)
     
-    st.markdown("### ✨ Como funciona:")
-    st.markdown("1. 🔑 Clique em 'Autorizar no RD Station'")
-    st.markdown("2. 🌐 Faça login e autorize")
-    st.markdown("3. ✅ **Pronto!** Você volta aqui automaticamente")
-    st.markdown("4. 📥 Comece a baixar holerites")
-    
-    st.divider()
-    
-    st.markdown("### 🎯 Recursos:")
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("✅ Autenticação automática OAuth2")
-        st.markdown("✅ Filtros por pipeline e stage")
-        st.markdown("✅ Download automático de holerites")
-    with col2:
-        st.markdown("✅ Renovação automática de tokens")
-        st.markdown("✅ Download em arquivo ZIP")
-        st.markdown("✅ Identificação inteligente de holerites")
+   
 else:
     col1, col2 = st.columns([2, 1])
     
